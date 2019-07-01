@@ -266,6 +266,25 @@ LIBIMOBILEDEVICE_API idevice_error_t idevice_new(idevice_t * device, const char 
 	return IDEVICE_E_NO_DEVICE;
 }
 
+LIBIMOBILEDEVICE_API idevice_error_t idevice_new_ignore_network(idevice_t * device, const char *udid)
+{
+    usbmuxd_device_info_t muxdev;
+    int res = usbmuxd_get_device(udid, &muxdev, DEVICE_LOOKUP_USBMUX);
+    if (res > 0) {
+        idevice_t dev = (idevice_t) malloc(sizeof(struct idevice_private));
+        dev->udid = strdup(muxdev.udid);
+        dev->mux_id = muxdev.handle;
+        dev->conn_type = CONNECTION_USBMUXD;
+        dev->conn_data = NULL;
+        dev->version = 0;
+        *device = dev;
+        return IDEVICE_E_SUCCESS;
+    }
+    /* other connection types could follow here */
+    
+    return IDEVICE_E_NO_DEVICE;
+}
+
 LIBIMOBILEDEVICE_API idevice_error_t idevice_free(idevice_t device)
 {
 	if (!device)

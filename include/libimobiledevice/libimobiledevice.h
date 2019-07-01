@@ -138,6 +138,21 @@ idevice_error_t idevice_device_list_free(char **devices);
  * @return IDEVICE_E_SUCCESS if ok, otherwise an error code.
  */
 idevice_error_t idevice_new(idevice_t *device, const char *udid);
+    
+/**
+ * Creates an idevice_t structure for the device specified by udid,
+ *  if the device is available via USB and not network.
+ *
+ * @note The resulting idevice_t structure has to be freed with
+ * idevice_free() if it is no longer used.
+ *
+ * @param device Upon calling this function, a pointer to a location of type
+ *  idevice_t. On successful return, this location will be populated.
+ * @param udid The UDID to match.
+ *
+ * @return IDEVICE_E_SUCCESS if ok, otherwise an error code.
+ */
+idevice_error_t idevice_new_ignore_network(idevice_t *device, const char *udid);
 
 /**
  * Cleans up an idevice structure, then frees the structure itself.
