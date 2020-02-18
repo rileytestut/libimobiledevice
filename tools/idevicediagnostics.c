@@ -28,6 +28,9 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <time.h>
+#ifndef WIN32
+#include <signal.h>
+#endif
 
 #include <libimobiledevice/libimobiledevice.h>
 #include <libimobiledevice/lockdown.h>
@@ -71,6 +74,9 @@ int main(int argc, char **argv)
 	plist_t node = NULL;
 	plist_t keys = NULL;
 
+#ifndef WIN32
+	signal(SIGPIPE, SIG_IGN);
+#endif
 	/* parse cmdline args */
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "--debug")) {
@@ -310,7 +316,7 @@ void print_usage(int argc, char **argv)
 	printf("Use diagnostics interface of a device running iOS 4 or later.\n\n");
 	printf(" Where COMMAND is one of:\n");
 	printf("  diagnostics [TYPE]\t\tprint diagnostics information from device by TYPE (All, WiFi, GasGauge, NAND)\n");
-	printf("  mobilegestalt KEY [...]\tprint mobilegestalt keys passed as arguments seperated by a space.\n");
+	printf("  mobilegestalt KEY [...]\tprint mobilegestalt keys passed as arguments separated by a space.\n");
 	printf("  ioreg [PLANE]\t\t\tprint IORegistry of device, optionally by PLANE (IODeviceTree, IOPower, IOService) (iOS 5+ only)\n");
 	printf("  ioregentry [KEY]\t\tprint IORegistry entry of device (AppleARMPMUCharger, ASPStorage, ...) (iOS 5+ only)\n");
 	printf("  shutdown\t\t\tshutdown device\n");

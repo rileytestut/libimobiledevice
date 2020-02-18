@@ -2,8 +2,8 @@
  * idevicebackup2.c
  * Command line interface to use the device's backup and restore service
  *
- * Copyright (c) 2010-2018 Nikias Bassen All Rights Reserved.
- * Copyright (c) 2009-2010 Martin Szulecki All Rights Reserved.
+ * Copyright (c) 2010-2019 Nikias Bassen, All Rights Reserved.
+ * Copyright (c) 2009-2010 Martin Szulecki, All Rights Reserved.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -42,6 +42,7 @@
 #include <libimobiledevice/afc.h>
 #include <libimobiledevice/installation_proxy.h>
 #include <libimobiledevice/sbservices.h>
+#include <libimobiledevice/diagnostics_relay.h>
 #include "common/utils.h"
 
 #include <endianness.h>
@@ -1004,6 +1005,8 @@ static int mb2_handle_receive_files(mobilebackup2_client_t mobilebackup2, plist_
 	plist_t node = NULL;
 	FILE *f = NULL;
 	unsigned int file_count = 0;
+	int errcode = 0;
+	char *errdesc = NULL;
 
 	if (!message || (plist_get_node_type(message) != PLIST_ARRAY) || plist_array_get_size(message) < 4 || !backup_dir) return 0;
 
@@ -1105,7 +1108,10 @@ static int mb2_handle_receive_files(mobilebackup2_client_t mobilebackup2, plist_
 			fclose(f);
 			file_count++;
 		} else {
-			printf("Error opening '%s' for writing: %s\n", bname, strerror(errno));
+			errcode = errno_to_device_error(errno);
+			errdesc = strerror(errno);
+			printf("Error opening '%s' for writing: %s\n", bname, errdesc);
+			break;
 		}
 		if (nlen == 0) {
 			break;
@@ -1144,9 +1150,8 @@ static int mb2_handle_receive_files(mobilebackup2_client_t mobilebackup2, plist_
 	if (dname != NULL)
 		free(dname);
 
-	// TODO error handling?!
 	plist_t empty_plist = plist_new_dict();
-	mobilebackup2_send_status_response(mobilebackup2, 0, NULL, empty_plist);
+	mobilebackup2_send_status_response(mobilebackup2, errcode, errdesc, empty_plist);
 	plist_free(empty_plist);
 
 	return file_count;
@@ -1428,6 +1433,8 @@ static void print_usage(int argc, char **argv)
 	printf("\n");
 	printf("Homepage: <" PACKAGE_URL ">\n");
 }
+
+#define DEVICE_VERSION(maj, min, patch) (((maj & 0xFF) << 16) | ((min & 0xFF) << 8) | (patch & 0xFF))
 
 int main(int argc, char *argv[])
 {
@@ -1753,6 +1760,25 @@ int main(int argc, char *argv[])
 		node_tmp = NULL;
 	}
 
+	/* get ProductVersion */
+	char *product_version = NULL;
+	int device_version = 0;
+	node_tmp = NULL;
+	lockdownd_get_value(lockdown, NULL, "ProductVersion", &node_tmp);
+	if (node_tmp) {
+		if (plist_get_node_type(node_tmp) == PLIST_STRING) {
+			plist_get_string_val(node_tmp, &product_version);
+		}
+		plist_free(node_tmp);
+		node_tmp = NULL;
+	}
+	if (product_version) {
+		int vers[3] = { 0, 0, 0 };
+		if (sscanf(product_version, "%d.%d.%d", &vers[0], &vers[1], &vers[2]) >= 2) {
+			device_version = DEVICE_VERSION(vers[0], vers[1], vers[2]);
+		}
+	}
+
 	/* start notification_proxy */
 	np_client_t np = NULL;
 	ldret = lockdownd_start_service(lockdown, NP_SERVICE_NAME, &service);
@@ -1950,7 +1976,7 @@ checkpoint:
 				} else if (err == MOBILEBACKUP2_E_REPLY_NOT_OK) {
 					printf("ERROR: Could not start backup process: device refused to start the backup process.\n");
 				} else {
-					printf("ERROR: Could not start backup process: unspecified error occured\n");
+					printf("ERROR: Could not start backup process: unspecified error occurred\n");
 				}
 				cmd = CMD_LEAVE;
 			}
@@ -2008,7 +2034,7 @@ checkpoint:
 				} else if (err == MOBILEBACKUP2_E_REPLY_NOT_OK) {
 					printf("ERROR: Could not start restore process: device refused to start the restore process.\n");
 				} else {
-					printf("ERROR: Could not start restore process: unspecified error occured\n");
+					printf("ERROR: Could not start restore process: unspecified error occurred\n");
 				}
 				cmd = CMD_LEAVE;
 			}
@@ -2104,6 +2130,32 @@ checkpoint:
 			}
 			if (newpw || backup_password) {
 				mobilebackup2_send_message(mobilebackup2, "ChangePassword", opts);
+				uint8_t passcode_hint = 0;
+				if (device_version >= DEVICE_VERSION(13,0,0)) {
+					diagnostics_relay_client_t diag = NULL;
+					if (diagnostics_relay_client_start_service(device, &diag, "idevicebackup2") == DIAGNOSTICS_RELAY_E_SUCCESS) {
+						plist_t dict = NULL;
+						plist_t keys = plist_new_array();
+						plist_array_append_item(keys, plist_new_string("PasswordConfigured"));
+						if (diagnostics_relay_query_mobilegestalt(diag, keys, &dict) == DIAGNOSTICS_RELAY_E_SUCCESS) {
+							plist_t node = plist_access_path(dict, 2, "MobileGestalt", "PasswordConfigured");
+							plist_get_bool_val(node, &passcode_hint);
+						}
+						plist_free(keys);
+						plist_free(dict);
+						diagnostics_relay_goodbye(diag);
+						diagnostics_relay_client_free(diag);
+					}
+				}
+				if (passcode_hint) {
+					if (cmd_flags & CMD_FLAG_ENCRYPTION_CHANGEPW) {
+						PRINT_VERBOSE(1, "Please confirm changing the backup password by entering the passcode on the device.\n");
+					} else if (cmd_flags & CMD_FLAG_ENCRYPTION_ENABLE) {
+						PRINT_VERBOSE(1, "Please confirm enabling the backup encryption by entering the passcode on the device.\n");
+					} else if (cmd_flags & CMD_FLAG_ENCRYPTION_DISABLE) {
+						PRINT_VERBOSE(1, "Please confirm disabling the backup encryption by entering the passcode on the device.\n");
+					}
+				}
 				/*if (cmd_flags & CMD_FLAG_ENCRYPTION_ENABLE) {
 					int retr = 10;
 					while ((retr-- >= 0) && !backup_domain_changed) {
@@ -2124,6 +2176,7 @@ checkpoint:
 			int operation_ok = 0;
 			plist_t message = NULL;
 
+			mobilebackup2_error_t mberr;
 			char *dlmsg = NULL;
 			int file_count = 0;
 			int errcode = 0;
@@ -2134,10 +2187,13 @@ checkpoint:
 			do {
 				free(dlmsg);
 				dlmsg = NULL;
-				mobilebackup2_receive_message(mobilebackup2, &message, &dlmsg);
-				if (!message || !dlmsg) {
-					PRINT_VERBOSE(1, "Device is not ready yet. Going to try again in 2 seconds...\n");
-					sleep(2);
+				mberr = mobilebackup2_receive_message(mobilebackup2, &message, &dlmsg);
+				if (mberr == MOBILEBACKUP2_E_RECEIVE_TIMEOUT) {
+					PRINT_VERBOSE(2, "Device is not ready yet, retrying...\n");
+					goto files_out;
+				} else if (mberr != MOBILEBACKUP2_E_SUCCESS) {
+					PRINT_VERBOSE(0, "ERROR: Could not receive from mobilebackup2 (%d)\n", mberr);
+					quit_flag++;
 					goto files_out;
 				}
 
