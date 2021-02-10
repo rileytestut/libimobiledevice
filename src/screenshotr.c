@@ -19,6 +19,9 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
 #include <plist/plist.h>
 #include <string.h>
 #include <stdlib.h>
@@ -27,7 +30,7 @@
 #include "device_link_service.h"
 #include "common/debug.h"
 
-#define SCREENSHOTR_VERSION_INT1 300
+#define SCREENSHOTR_VERSION_INT1 400
 #define SCREENSHOTR_VERSION_INT2 0
 
 /**

@@ -2,7 +2,8 @@
  * debugserver.c
  * com.apple.debugserver service implementation.
  *
- * Copyright (c) 2014 Martin Szulecki All Rights Reserved.
+ * Copyright (c) 2019 Nikias Bassen, All Rights Reserved.
+ * Copyright (c) 2014-2015 Martin Szulecki All Rights Reserved.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -54,7 +55,7 @@ static debugserver_error_t debugserver_error(service_error_t err)
 			return DEBUGSERVER_E_MUX_ERROR;
 		case SERVICE_E_SSL_ERROR:
 			return DEBUGSERVER_E_SSL_ERROR;
-        case SERVICE_E_TIMEOUT:
+		case SERVICE_E_TIMEOUT:
 			return DEBUGSERVER_E_TIMEOUT;
 		default:
 			break;
@@ -79,7 +80,10 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_new(idevice_t device
 		debug_info("Creating base service client failed. Error: %i", ret);
 		return ret;
 	}
-	service_disable_bypass_ssl(parent, 1);
+
+	if (service->identifier && (strcmp(service->identifier, DEBUGSERVER_SECURE_SERVICE_NAME) != 0)) {
+		service_disable_bypass_ssl(parent, 1);
+	}
 
 	debugserver_client_t client_loc = (debugserver_client_t) malloc(sizeof(struct debugserver_client_private));
 	client_loc->parent = parent;
@@ -94,7 +98,11 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_new(idevice_t device
 LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_start_service(idevice_t device, debugserver_client_t * client, const char* label)
 {
 	debugserver_error_t err = DEBUGSERVER_E_UNKNOWN_ERROR;
-	service_client_factory_start_service(device, DEBUGSERVER_SERVICE_NAME, (void**)client, label, SERVICE_CONSTRUCTOR(debugserver_client_new), &err);
+	service_client_factory_start_service(device, DEBUGSERVER_SECURE_SERVICE_NAME, (void**)client, label, SERVICE_CONSTRUCTOR(debugserver_client_new), &err);
+	if (err != DEBUGSERVER_E_SUCCESS) {
+		err = DEBUGSERVER_E_UNKNOWN_ERROR;
+		service_client_factory_start_service(device, DEBUGSERVER_SERVICE_NAME, (void**)client, label, SERVICE_CONSTRUCTOR(debugserver_client_new), &err);
+	}
 	return err;
 }
 
@@ -148,7 +156,7 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_receive_with_timeout
 		*received = (uint32_t)bytes;
 	}
 
-	return res;
+	return (bytes > 0) ? DEBUGSERVER_E_SUCCESS : res;
 }
 
 LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_receive(debugserver_client_t client, char* data, uint32_t size, uint32_t *received)
@@ -370,7 +378,7 @@ static int debugserver_client_receive_internal_check(debugserver_client_t client
 	return did_receive_char;
 }
 
-LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_receive_response(debugserver_client_t client, char** response)
+LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_receive_response(debugserver_client_t client, char** response, size_t* response_size)
 {
 	debugserver_error_t res = DEBUGSERVER_E_SUCCESS;
 
@@ -380,6 +388,7 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_receive_response(deb
 
 	char* buffer = NULL;
 	uint32_t buffer_size = 0;
+	uint32_t buffer_capacity = 0;
 
 	if (response)
 		*response = NULL;
@@ -392,7 +401,9 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_receive_response(deb
 		if (strncmp(ack, command_prefix, sizeof(char)) == 0) {
 			should_receive = 1;
 			skip_prefix = 1;
-			buffer = strdup(command_prefix);
+			buffer = malloc(1024);
+			buffer_capacity = 1024;
+			strcpy(buffer, command_prefix);
 			buffer_size += sizeof(char);
 			debug_info("received ACK");
 		}
@@ -406,9 +417,11 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_receive_response(deb
 		debug_info("received command_prefix: %c", *command_prefix);
 		if (should_receive) {
 			if (buffer) {
-				memcpy(buffer, command_prefix, sizeof(char));
+				strcpy(buffer, command_prefix);
 			} else {
-				buffer = strdup(command_prefix);
+				buffer = malloc(1024);
+				buffer_capacity = 1024;
+				strcpy(buffer, command_prefix);
 				buffer_size += sizeof(char);
 			}
 		}
@@ -420,6 +433,7 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_receive_response(deb
 		uint32_t checksum_length = DEBUGSERVER_CHECKSUM_HASH_LENGTH;
 		int receiving_checksum_response = 0;
 		debug_info("attempting to read up response until checksum");
+
 		while ((checksum_length > 0)) {
 			char data[2] = {'#', '\0'};
 			if (debugserver_client_receive_internal_check(client, data)) {
@@ -428,22 +442,27 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_receive_response(deb
 			if (receiving_checksum_response) {
 				checksum_length--;
 			}
-			char* newbuffer = string_concat(buffer, data, NULL);
+			if (buffer_size + 1 >= buffer_capacity) {
+				char* newbuffer = realloc(buffer, buffer_capacity+1024);
+				if (!newbuffer) {
+					return DEBUGSERVER_E_UNKNOWN_ERROR;
+				}
+				buffer = newbuffer;
+				buffer[buffer_capacity] = '\0';
+				buffer_capacity += 1024;
+			}
+			strcat(buffer, data);
 			buffer_size += sizeof(char);
-			free(buffer);
-			buffer = NULL;
-			buffer = newbuffer;
-			newbuffer = NULL;
 		}
 		debug_info("validating response checksum...");
-		int valid_response = debugserver_response_is_checksum_valid(buffer, buffer_size);
-		if (valid_response) {
+		if (client->noack_mode || debugserver_response_is_checksum_valid(buffer, buffer_size)) {
 			if (response) {
 				/* assemble response string */
-				uint32_t response_size = sizeof(char) * (buffer_size - DEBUGSERVER_CHECKSUM_HASH_LENGTH - 1);
-				*response = (char*)malloc(response_size + 1);
-				memcpy(*response, buffer + 1, response_size);
-				(*response)[response_size] = '\0';
+				uint32_t resp_size = sizeof(char) * (buffer_size - DEBUGSERVER_CHECKSUM_HASH_LENGTH - 1);
+				*response = (char*)malloc(resp_size + 1);
+				memcpy(*response, buffer + 1, resp_size);
+				(*response)[resp_size] = '\0';
+				if (response_size) *response_size = resp_size;
 			}
 			if (!client->noack_mode) {
 				/* confirm valid command */
@@ -472,7 +491,7 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_receive_response(deb
 	return res;
 }
 
-LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_send_command(debugserver_client_t client, debugserver_command_t command, char** response)
+LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_send_command(debugserver_client_t client, debugserver_command_t command, char** response, size_t* response_size)
 {
 	debugserver_error_t res = DEBUGSERVER_E_SUCCESS;
 	int i;
@@ -484,25 +503,15 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_send_command(debugse
 	char* command_arguments = NULL;
 
 	/* concat all arguments */
-	char* tmp = NULL;
-	char* newtmp = NULL;
 	for (i = 0; i < command->argc; i++) {
 		debug_info("argv[%d]: %s", i, command->argv[i]);
-		if (!tmp) {
-			tmp = strdup(command->argv[i]);
-		} else {
-			newtmp = string_concat(tmp, command->argv[i], NULL);
-			free(tmp);
-			tmp = newtmp;
-		}
+		command_arguments = string_append(command_arguments, command->argv[i], NULL);
 	}
-	command_arguments = tmp;
-	tmp = NULL;
 
 	debug_info("command_arguments(%d): %s", command->argc, command_arguments);
 
 	/* encode command arguments, add checksum if required and assemble entire command */
-	debugserver_format_command("$", command->name, command_arguments, !client->noack_mode, &send_buffer, &send_buffer_size);
+	debugserver_format_command("$", command->name, command_arguments, 1, &send_buffer, &send_buffer_size);
 
 	debug_info("sending encoded command: %s", send_buffer);
 
@@ -513,7 +522,7 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_send_command(debugse
 	}
 
 	/* receive response */
-	res = debugserver_client_receive_response(client, response);
+	res = debugserver_client_receive_response(client, response, response_size);
 	debug_info("response result: %d", res);
 	if (res != DEBUGSERVER_E_SUCCESS) {
 		goto cleanup;
@@ -549,7 +558,7 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_set_environment_hex_
 
 	debugserver_command_t command = NULL;
 	debugserver_command_new("QEnvironmentHexEncoded:", 1, env_arg, &command);
-	result = debugserver_client_send_command(client, command, response);
+	result = debugserver_client_send_command(client, command, response, NULL);
 	debugserver_command_free(command);
 
 	free(env_tmp);
@@ -597,8 +606,8 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_set_argv(debugserver
 		char *p = m;
 		char *q = (char*)argv[i];
 		while (*q) {
-			*p++ = debugserver_int2hex(*q >> 4);
-			*p++ = debugserver_int2hex(*q & 0xf);
+			*p++ = DEBUGSERVER_HEX_ENCODE_FIRST_BYTE(*q);
+			*p++ = DEBUGSERVER_HEX_ENCODE_SECOND_BYTE(*q);
 			q++;
 		}
 
@@ -618,7 +627,7 @@ LIBIMOBILEDEVICE_API debugserver_error_t debugserver_client_set_argv(debugserver
 
 	debugserver_command_t command = NULL;
 	debugserver_command_new(pkt, 0, NULL, &command);
-	result = debugserver_client_send_command(client, command, response);
+	result = debugserver_client_send_command(client, command, response, NULL);
 	debugserver_command_free(command);
 
 	if (pkt)

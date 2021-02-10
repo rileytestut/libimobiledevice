@@ -1,7 +1,10 @@
 /*
  * utils.c
- * Miscellaneous utilities for string manipulation
+ * Miscellaneous utilities for string manipulation,
+ * file I/O and plist helper.
  *
+ * Copyright (c) 2014-2019 Nikias Bassen, All Rights Reserved.
+ * Copyright (c) 2013-2014 Martin Szulecki, All Rights Reserved.
  * Copyright (c) 2013 Federico Mena Quintero
  *
  * This library is free software; you can redistribute it and/or
@@ -99,6 +102,50 @@ char *string_concat(const char *str, ...)
 	dest = result;
 
 	dest = stpcpy(dest, str);
+
+	va_start(args, str);
+	s = va_arg(args, char *);
+	while (s) {
+		dest = stpcpy(dest, s);
+		s = va_arg(args, char *);
+	}
+	va_end(args);
+
+	return result;
+}
+
+char *string_append(char* str, ...)
+{
+	size_t len = 0;
+	size_t slen;
+	va_list args;
+	char *s;
+	char *result;
+	char *dest;
+
+	/* Compute final length */
+
+	if (str) {
+		len = strlen(str);
+	}
+	slen = len;
+	len++; /* plus 1 for the null terminator */
+
+	va_start(args, str);
+	s = va_arg(args, char *);
+	while (s) {
+		len += strlen(s);
+		s = va_arg(args, char*);
+	}
+	va_end(args);
+
+	result = realloc(str, len);
+	if (!result)
+		return NULL; /* errno remains set */
+
+	dest = result + slen;
+
+	/* Concat additional strings */
 
 	va_start(args, str);
 	s = va_arg(args, char *);
@@ -425,7 +472,7 @@ static void plist_node_print_to_stream(plist_t node, int* indent_level, FILE* st
 	case PLIST_DATE:
 		plist_get_date_val(node, (int32_t*)&tv.tv_sec, (int32_t*)&tv.tv_usec);
 		{
-			time_t ti = (time_t)tv.tv_sec;
+			time_t ti = (time_t)tv.tv_sec + MAC_EPOCH;
 			struct tm *btime = localtime(&ti);
 			if (btime) {
 				s = (char*)malloc(24);
